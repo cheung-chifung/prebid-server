@@ -6,14 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"runtime/debug"
-	"strings"
 	"time"
 
 	"github.com/golang/glog"
-	"golang.org/x/text/currency"
-
 	"github.com/mxmCherry/openrtb"
-
 	"github.com/prebid/prebid-server/adapters"
 	"github.com/prebid/prebid-server/config"
 	"github.com/prebid/prebid-server/errortypes"
@@ -189,11 +185,6 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 			// Add in time reporting
 			elapsed := time.Since(start)
 			brw.AdapterBids = bids
-			// validate bids ASAP, so we don't waste time on invalid bids.
-			err2 := brw.ValidateBids(request)
-			if len(err2) > 0 {
-				err = append(err, err2...)
-			}
 			// Structure to record extra tracking data generated during bidding
 			ae := new(SeatResponseExtra)
 			ae.ResponseTimeMillis = int(elapsed / time.Millisecond)
@@ -311,8 +302,9 @@ func (e *exchange) buildBidResponse(ctx context.Context, liveAdapters []openrtb_
 // Extract all the data from the SeatBids and build the ExtBidResponse
 func (e *exchange) makeExtBidResponse(adapterBids map[openrtb_ext.BidderName]*PBSOrtbSeatBid, adapterExtra map[openrtb_ext.BidderName]*SeatResponseExtra, req *openrtb.BidRequest, resolvedRequest json.RawMessage, errList []error) *openrtb_ext.ExtBidResponse {
 	bidResponseExt := &openrtb_ext.ExtBidResponse{
-		Errors:             make(map[openrtb_ext.BidderName][]openrtb_ext.ExtBidderError, len(adapterBids)),
-		ResponseTimeMillis: make(map[openrtb_ext.BidderName]int, len(adapterBids)),
+		Errors:               make(map[openrtb_ext.BidderName][]openrtb_ext.ExtBidderError, len(adapterBids)),
+		ResponseTimeMillis:   make(map[openrtb_ext.BidderName]int, len(adapterBids)),
+		RequestTimeoutMillis: req.TMax,
 	}
 	if req.Test == 1 {
 		bidResponseExt.Debug = &openrtb_ext.ExtResponseDebug{
@@ -399,93 +391,4 @@ func (e *exchange) makeBid(Bids []*PBSOrtbBid, adapter openrtb_ext.BidderName) (
 		}
 	}
 	return bids, errList
-}
-
-// ValidateBids will run some validation checks on the returned bids and excise any invalid bids
-func (brw *BidResponseWrapper) ValidateBids(request *openrtb.BidRequest) (err []error) {
-	// Exit early if there is nothing to do.
-	if brw.AdapterBids == nil || len(brw.AdapterBids.Bids) == 0 {
-		return
-	}
-
-	err = make([]error, 0, len(brw.AdapterBids.Bids))
-
-	// By design, default currency is USD.
-	if cerr := validateCurrency(request.Cur, brw.AdapterBids.Currency); cerr != nil {
-		brw.AdapterBids.Bids = nil
-		err = append(err, cerr)
-		return
-	}
-
-	validBids := make([]*PBSOrtbBid, 0, len(brw.AdapterBids.Bids))
-	for _, bid := range brw.AdapterBids.Bids {
-		if ok, berr := validateBid(bid); ok {
-			validBids = append(validBids, bid)
-		} else {
-			err = append(err, berr)
-		}
-	}
-	if len(validBids) != len(brw.AdapterBids.Bids) {
-		// If all bids are valid, the two slices should be equal. Otherwise replace the list of bids with the valid bids.
-		brw.AdapterBids.Bids = validBids
-	}
-	return err
-}
-
-// validateCurrency will run currency validation checks and return true if it passes, false otherwise.
-func validateCurrency(requestAllowedCurrencies []string, bidCurrency string) error {
-	// Default currency is `USD` by design.
-	defaultCurrency := "USD"
-	// Make sure bid currency is a valid ISO currency code
-	if bidCurrency == "" {
-		// If bid currency is not set, then consider it's default currency.
-		bidCurrency = defaultCurrency
-	}
-	currencyUnit, cerr := currency.ParseISO(bidCurrency)
-	if cerr != nil {
-		return cerr
-	}
-	// Make sure the bid currency is allowed from bid request via `cur` field.
-	// If `cur` field array from bid request is empty, then consider it accepts the default currency.
-	currencyAllowed := false
-	if len(requestAllowedCurrencies) == 0 {
-		requestAllowedCurrencies = []string{defaultCurrency}
-	}
-	for _, allowedCurrency := range requestAllowedCurrencies {
-		if strings.ToUpper(allowedCurrency) == currencyUnit.String() {
-			currencyAllowed = true
-			break
-		}
-	}
-	if currencyAllowed == false {
-		return fmt.Errorf(
-			"Bid currency is not allowed. Was '%s', wants: ['%s']",
-			currencyUnit.String(),
-			strings.Join(requestAllowedCurrencies, "', '"),
-		)
-	}
-
-	return nil
-}
-
-// validateBid will run the supplied bid through validation checks and return true if it passes, false otherwise.
-func validateBid(bid *PBSOrtbBid) (bool, error) {
-	if bid.Bid == nil {
-		return false, fmt.Errorf("Empty bid object submitted.")
-	}
-	// These are the three required fields for bids
-	if bid.Bid.ID == "" {
-		return false, fmt.Errorf("Bid missing required field 'id'")
-	}
-	if bid.Bid.ImpID == "" {
-		return false, fmt.Errorf("Bid \"%s\" missing required field 'impid'", bid.Bid.ID)
-	}
-	if bid.Bid.Price <= 0.0 {
-		return false, fmt.Errorf("Bid \"%s\" does not contain a positive 'price'", bid.Bid.ID)
-	}
-	if bid.Bid.CrID == "" {
-		return false, fmt.Errorf("Bid \"%s\" missing creative ID", bid.Bid.ID)
-	}
-
-	return true, nil
 }
