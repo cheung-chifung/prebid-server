@@ -20,15 +20,19 @@ type BidderName string
 // These names _must_ coincide with the bidder code in Prebid.js, if an adapter also exists in that project.
 // Please keep these (and the BidderMap) alphabetized to minimize merge conflicts among adapter submissions.
 const (
+	Bidder33Across     BidderName = "33across"
 	BidderAdkernelAdn  BidderName = "adkernelAdn"
 	BidderAdtelligent  BidderName = "adtelligent"
 	BidderAdform       BidderName = "adform"
 	BidderAppnexus     BidderName = "appnexus"
 	BidderBeachfront   BidderName = "beachfront"
 	BidderBrightroll   BidderName = "brightroll"
+	BidderConsumable   BidderName = "consumable"
 	BidderConversant   BidderName = "conversant"
 	BidderEPlanning    BidderName = "eplanning"
 	BidderFacebook     BidderName = "audienceNetwork"
+	BidderGamoshi      BidderName = "gamoshi"
+	BidderGrid         BidderName = "grid"
 	BidderGumGum       BidderName = "gumgum"
 	BidderIx           BidderName = "ix"
 	BidderLifestreet   BidderName = "lifestreet"
@@ -39,12 +43,13 @@ const (
 	BidderRubicon      BidderName = "rubicon"
 	BidderSomoaudience BidderName = "somoaudience"
 	BidderSovrn        BidderName = "sovrn"
-	Bidder33Across     BidderName = "33across"
-	BidderGrid         BidderName = "grid"
+	BidderSonobi       BidderName = "sonobi"
+	BidderYieldmo      BidderName = "yieldmo"
 )
 
 // BidderMap stores all the valid OpenRTB 2.x Bidders in the project. This map *must not* be mutated.
 var BidderMap = map[string]BidderName{
+	"33across":        Bidder33Across,
 	"adkernelAdn":     BidderAdkernelAdn,
 	"adtelligent":     BidderAdtelligent,
 	"adform":          BidderAdform,
@@ -52,8 +57,11 @@ var BidderMap = map[string]BidderName{
 	"beachfront":      BidderBeachfront,
 	"audienceNetwork": BidderFacebook,
 	"brightroll":      BidderBrightroll,
+	"consumable":      BidderConsumable,
 	"conversant":      BidderConversant,
 	"eplanning":       BidderEPlanning,
+	"gamoshi":         BidderGamoshi,
+	"grid":            BidderGrid,
 	"gumgum":          BidderGumGum,
 	"ix":              BidderIx,
 	"lifestreet":      BidderLifestreet,
@@ -64,8 +72,8 @@ var BidderMap = map[string]BidderName{
 	"rubicon":         BidderRubicon,
 	"somoaudience":    BidderSomoaudience,
 	"sovrn":           BidderSovrn,
-	"33across":        Bidder33Across,
-	"grid":            BidderGrid,
+	"sonobi":          BidderSonobi,
+	"yieldmo":         BidderYieldmo,
 }
 
 // BidderList returns the values of the BidderMap

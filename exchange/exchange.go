@@ -12,6 +12,7 @@ import (
 	"github.com/mxmCherry/openrtb"
 	"github.com/prebid/prebid-server/adapters"
 	"github.com/prebid/prebid-server/config"
+	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/errortypes"
 	"github.com/prebid/prebid-server/gdpr"
 	"github.com/prebid/prebid-server/openrtb_ext"
@@ -37,6 +38,7 @@ type exchange struct {
 	cache               prebid_cache_client.Client
 	cacheTime           time.Duration
 	gDPR                gdpr.Permissions
+	currencyConverter   *currencies.RateConverter
 	UsersyncIfAmbiguous bool
 	defaultTTLs         config.DefaultTTLs
 }
@@ -53,7 +55,7 @@ type BidResponseWrapper struct {
 	Bidder       openrtb_ext.BidderName
 }
 
-func NewExchange(client *http.Client, cache prebid_cache_client.Client, cfg *config.Configuration, metricsEngine pbsmetrics.MetricsEngine, infos adapters.BidderInfos, gDPR gdpr.Permissions) Exchange {
+func NewExchange(client *http.Client, cache prebid_cache_client.Client, cfg *config.Configuration, metricsEngine pbsmetrics.MetricsEngine, infos adapters.BidderInfos, gDPR gdpr.Permissions, currencyConverter *currencies.RateConverter) Exchange {
 	e := new(exchange)
 
 	e.adapterMap = newAdapterMap(client, cfg, infos)
@@ -61,6 +63,7 @@ func NewExchange(client *http.Client, cache prebid_cache_client.Client, cfg *con
 	e.cacheTime = time.Duration(cfg.CacheURL.ExpectedTimeMillis) * time.Millisecond
 	e.me = metricsEngine
 	e.gDPR = gDPR
+	e.currencyConverter = currencyConverter
 	e.UsersyncIfAmbiguous = cfg.GDPR.UsersyncIfAmbiguous
 	e.defaultTTLs = cfg.CacheURL.DefaultTTLs
 	return e
@@ -127,7 +130,10 @@ func (e *exchange) HoldAuction(ctx context.Context, bidRequest *openrtb.BidReque
 	auctionCtx, cancel := e.makeAuctionContext(ctx, shouldCacheBids)
 	defer cancel()
 
-	adapterBids, adapterExtra := e.getAllBids(auctionCtx, cleanRequests, aliases, bidAdjustmentFactors, blabels)
+	// Get currency rates conversions for the auction
+	conversions := e.currencyConverter.Rates()
+
+	adapterBids, adapterExtra := e.getAllBids(auctionCtx, cleanRequests, aliases, bidAdjustmentFactors, blabels, conversions)
 	auc := NewAuction(adapterBids, len(bidRequest.Imp))
 	if targData != nil {
 		auc.SetRoundedPrices(targData.PriceGranularity)
@@ -153,7 +159,7 @@ func (e *exchange) makeAuctionContext(ctx context.Context, needsCache bool) (auc
 }
 
 // This piece sends all the requests to the bidder adapters and gathers the results.
-func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext.BidderName]*openrtb.BidRequest, aliases map[string]string, bidAdjustments map[string]float64, blabels map[openrtb_ext.BidderName]*pbsmetrics.AdapterLabels) (map[openrtb_ext.BidderName]*PBSOrtbSeatBid, map[openrtb_ext.BidderName]*SeatResponseExtra) {
+func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext.BidderName]*openrtb.BidRequest, aliases map[string]string, bidAdjustments map[string]float64, blabels map[openrtb_ext.BidderName]*pbsmetrics.AdapterLabels, conversions currencies.Conversions) (map[openrtb_ext.BidderName]*PBSOrtbSeatBid, map[openrtb_ext.BidderName]*SeatResponseExtra) {
 	// Set up pointers to the bid results
 	adapterBids := make(map[openrtb_ext.BidderName]*PBSOrtbSeatBid, len(cleanRequests))
 	adapterExtra := make(map[openrtb_ext.BidderName]*SeatResponseExtra, len(cleanRequests))
@@ -162,7 +168,7 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 	for bidderName, req := range cleanRequests {
 		// Here we actually call the adapters and collect the bids.
 		coreBidder := ResolveBidder(string(bidderName), aliases)
-		bidderRunner := RecoverSafely(func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels) {
+		bidderRunner := e.RecoverSafely(func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels, conversions currencies.Conversions) {
 			// Passing in aName so a doesn't change out from under the go routine
 			if bidlabels.Adapter == "" {
 				glog.Errorf("Exchange: bidlables for %s (%s) missing adapter string", aName, coreBidder)
@@ -180,7 +186,7 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 			if givenAdjustment, ok := bidAdjustments[string(aName)]; ok {
 				adjustmentFactor = givenAdjustment
 			}
-			bids, err := e.adapterMap[coreBidder].RequestBid(ctx, request, aName, adjustmentFactor)
+			bids, err := e.adapterMap[coreBidder].RequestBid(ctx, request, aName, adjustmentFactor, conversions)
 
 			// Add in time reporting
 			elapsed := time.Since(start)
@@ -205,7 +211,7 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 			}
 			chBids <- brw
 		}, chBids)
-		go bidderRunner(bidderName, coreBidder, req, blabels[coreBidder])
+		go bidderRunner(bidderName, coreBidder, req, blabels[coreBidder], conversions)
 	}
 	// Wait for the bidders to do their thing
 	for i := 0; i < len(cleanRequests); i++ {
@@ -217,18 +223,19 @@ func (e *exchange) getAllBids(ctx context.Context, cleanRequests map[openrtb_ext
 	return adapterBids, adapterExtra
 }
 
-func RecoverSafely(inner func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels), chBids chan *BidResponseWrapper) func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels) {
-	return func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels) {
+func (e *exchange) RecoverSafely(inner func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels, currencies.Conversions), chBids chan *BidResponseWrapper) func(openrtb_ext.BidderName, openrtb_ext.BidderName, *openrtb.BidRequest, *pbsmetrics.AdapterLabels, currencies.Conversions) {
+	return func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels, conversions currencies.Conversions) {
 		defer func() {
 			if r := recover(); r != nil {
 				glog.Errorf("OpenRTB auction recovered panic from Bidder %s: %v. Stack trace is: %v", coreBidder, r, string(debug.Stack()))
+				e.me.RecordAdapterPanic(*bidlabels)
 				// Let the master request know that there is no data here
 				brw := new(BidResponseWrapper)
 				brw.AdapterExtra = new(SeatResponseExtra)
 				chBids <- brw
 			}
 		}()
-		inner(aName, coreBidder, request, bidlabels)
+		inner(aName, coreBidder, request, bidlabels, conversions)
 	}
 }
 

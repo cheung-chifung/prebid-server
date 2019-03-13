@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/prebid/prebid-server/adapters"
+	"github.com/prebid/prebid-server/currencies"
 	"github.com/prebid/prebid-server/prebid_cache_client"
 
 	"github.com/buger/jsonparser"
@@ -43,7 +44,7 @@ func TestNewExchange(t *testing.T) {
 		Adapters: blankAdapterConfig(openrtb_ext.BidderList()),
 	}
 
-	e := NewExchange(server.Client(), nil, cfg, pbsmetrics.NewMetrics(metrics.NewRegistry(), knownAdapters), adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{}).(*exchange)
+	e := NewExchange(server.Client(), nil, cfg, pbsmetrics.NewMetrics(metrics.NewRegistry(), knownAdapters), adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{}, currencies.NewRateConverterDefault()).(*exchange)
 	for _, bidderName := range knownAdapters {
 		if _, ok := e.adapterMap[bidderName]; !ok {
 			t.Errorf("NewExchange produced an Exchange without bidder %s", bidderName)
@@ -83,7 +84,7 @@ func TestRaceIntegration(t *testing.T) {
 	}
 
 	theMetrics := pbsmetrics.NewMetrics(metrics.NewRegistry(), openrtb_ext.BidderList())
-	ex := NewExchange(server.Client(), &wellBehavedCache{}, cfg, theMetrics, adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{})
+	ex := NewExchange(server.Client(), &wellBehavedCache{}, cfg, theMetrics, adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{}, currencies.NewRateConverterDefault())
 	_, err := ex.HoldAuction(context.Background(), newRaceCheckingRequest(t), &emptyUsersync{}, pbsmetrics.Labels{})
 	if err != nil {
 		t.Errorf("HoldAuction returned unexpected error: %v", err)
@@ -93,6 +94,7 @@ func TestRaceIntegration(t *testing.T) {
 // newRaceCheckingRequest builds a BidRequest from all the params in the
 // adapters/{bidder}/{bidder}test/params/race/*.json files
 func newRaceCheckingRequest(t *testing.T) *openrtb.BidRequest {
+	dnt := int8(1)
 	return &openrtb.BidRequest{
 		Site: &openrtb.Site{
 			Page:   "www.some.domain.com",
@@ -105,7 +107,7 @@ func newRaceCheckingRequest(t *testing.T) *openrtb.BidRequest {
 			UA:       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.87 Safari/537.36",
 			IFA:      "ifa",
 			IP:       "132.173.230.74",
-			DNT:      1,
+			DNT:      &dnt,
 			Language: "EN",
 		},
 		Source: &openrtb.Source{
@@ -145,12 +147,30 @@ func newRaceCheckingRequest(t *testing.T) *openrtb.BidRequest {
 }
 
 func TestPanicRecovery(t *testing.T) {
+	cfg := &config.Configuration{
+		CacheURL: config.Cache{
+			ExpectedTimeMillis: 20,
+		},
+		Adapters: blankAdapterConfig(openrtb_ext.BidderList()),
+	}
+
+	theMetrics := pbsmetrics.NewMetrics(metrics.NewRegistry(), openrtb_ext.BidderList())
+	e := NewExchange(&http.Client{}, nil, cfg, theMetrics, adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{}, currencies.NewRateConverterDefault()).(*exchange)
 	chBids := make(chan *BidResponseWrapper, 1)
-	panicker := func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels) {
+	panicker := func(aName openrtb_ext.BidderName, coreBidder openrtb_ext.BidderName, request *openrtb.BidRequest, bidlabels *pbsmetrics.AdapterLabels, conversions currencies.Conversions) {
 		panic("panic!")
 	}
-	recovered := RecoverSafely(panicker, chBids)
-	recovered(openrtb_ext.BidderAppnexus, openrtb_ext.BidderAppnexus, nil, nil)
+	recovered := e.RecoverSafely(panicker, chBids)
+	apnLabels := pbsmetrics.AdapterLabels{
+		Source:      pbsmetrics.DemandWeb,
+		RType:       pbsmetrics.ReqTypeORTB2Web,
+		Adapter:     openrtb_ext.BidderAppnexus,
+		PubID:       "test1",
+		Browser:     pbsmetrics.BrowserSafari,
+		CookieFlag:  pbsmetrics.CookieFlagYes,
+		AdapterBids: pbsmetrics.AdapterBidNone,
+	}
+	recovered(openrtb_ext.BidderAppnexus, openrtb_ext.BidderAppnexus, nil, &apnLabels, nil)
 }
 
 func buildImpExt(t *testing.T, jsonFilename string) json.RawMessage {
@@ -192,7 +212,7 @@ func TestPanicRecoveryHighLevel(t *testing.T) {
 			Endpoint: server.URL,
 		}
 	}
-	e := NewExchange(server.Client(), nil, cfg, pbsmetrics.NewMetrics(metrics.NewRegistry(), openrtb_ext.BidderList()), adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{}).(*exchange)
+	e := NewExchange(server.Client(), nil, cfg, pbsmetrics.NewMetrics(metrics.NewRegistry(), openrtb_ext.BidderList()), adapters.ParseBidderInfos("../static/bidder-info", openrtb_ext.BidderList()), gdpr.AlwaysAllow{}, currencies.NewRateConverterDefault()).(*exchange)
 
 	e.adapterMap[openrtb_ext.BidderBeachfront] = panicingAdapter{}
 	e.adapterMap[openrtb_ext.BidderAppnexus] = panicingAdapter{}
@@ -381,6 +401,7 @@ func newExchangeForTests(t *testing.T, filename string, expectations map[string]
 		cache:               &wellBehavedCache{},
 		cacheTime:           0,
 		gDPR:                gdpr.AlwaysAllow{},
+		currencyConverter:   currencies.NewRateConverterDefault(),
 		UsersyncIfAmbiguous: false,
 	}
 }
@@ -447,7 +468,7 @@ type validatingBidder struct {
 	mockResponses map[string]bidderResponse
 }
 
-func (b *validatingBidder) RequestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64) (seatBid *PBSOrtbSeatBid, errs []error) {
+func (b *validatingBidder) RequestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64, conversions currencies.Conversions) (seatBid *PBSOrtbSeatBid, errs []error) {
 	if expectedRequest, ok := b.expectations[string(name)]; ok {
 		if expectedRequest != nil {
 			if expectedRequest.BidAdjustment != bidAdjustment {
@@ -599,6 +620,6 @@ func (e *mockUsersync) GetId(bidder openrtb_ext.BidderName) (id string, exists b
 
 type panicingAdapter struct{}
 
-func (panicingAdapter) RequestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64) (posb *PBSOrtbSeatBid, errs []error) {
+func (panicingAdapter) RequestBid(ctx context.Context, request *openrtb.BidRequest, name openrtb_ext.BidderName, bidAdjustment float64, conversions currencies.Conversions) (posb *PBSOrtbSeatBid, errs []error) {
 	panic("Panic! Panic! The world is ending!")
 }
