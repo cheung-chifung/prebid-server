@@ -110,7 +110,7 @@ func (bidder *BidderAdapter) RequestBid(ctx context.Context, request *openrtb.Bi
 		}
 	}
 
-	defaultCurrency := "USD"
+	defaultCurrency := "JPY"
 	seatBid := &PBSOrtbSeatBid{
 		Bids:      make([]*PBSOrtbBid, 0, len(reqData)),
 		Currency:  defaultCurrency,
@@ -140,7 +140,7 @@ func (bidder *BidderAdapter) RequestBid(ctx context.Context, request *openrtb.Bi
 
 				// Try to get a conversion rate
 				// TODO(#280): try to convert every to element of request.cur, and use the first one which succeeds
-				if conversionRate, err := conversions.GetRate(bidResponse.Currency, "USD"); err == nil {
+				if conversionRate, err := conversions.GetRate(bidResponse.Currency, defaultCurrency); err == nil {
 					// Conversion rate found, using it for conversion
 					for i := 0; i < len(bidResponse.Bids); i++ {
 						if bidResponse.Bids[i].Bid != nil {
